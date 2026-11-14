@@ -25,7 +25,7 @@ window.EXTRA_TRACKS = [
   rail: [[.66, 950], [.70, 950], [.74, 950], [.78, 1000]],
   marks: [['ferris', .075, 1, 620], ['pagoda', .83, 1, 560], ['castle', .24, -1, 520], ['redbridge', .345, -1, 640], ['torii', .80, -1, 300]] },
 
-{ id: 'spa', climate: [0.2, 0.3, 0.35, 0.15], sec: [0.25, 0.7], flag: 'be', name: 'SPA', sub: 'Spa-Francorchamps · Belgium', km: '7.00', scale: 1, hw: 100, wall: 28, pts: TX_PTS.spa,
+{ id: 'spa', pit: { c: -35, sd: 1 }, climate: [0.2, 0.3, 0.35, 0.15], sec: [0.25, 0.7], flag: 'be', name: 'SPA', sub: 'Spa-Francorchamps · Belgium', km: '7.00', scale: 1, hw: 100, wall: 28, pts: TX_PTS.spa,
   tint: 'rgba(90,85,120,.07)', verge: '#6d6f68', cars: ['#7c2a26', '#2d3a2f', '#c9c6bd', '#1f2226', '#34506e'], streetC: '#44443f', treeBase: 'oak',
   elev: [[0, 62], [.05, 66], [.15, 8], [.2, 52], [.33, 100], [.42, 70], [.55, 58], [.65, 38], [.74, 26], [.85, 22], [.95, 55]],
   zones: [
@@ -318,7 +318,9 @@ function buildThemed(T) {
   const put = o => { const key = Math.floor(o.x / BK) + ',' + Math.floor(o.y / BK); (T.buckets.get(key) || T.buckets.set(key, []).get(key)).push(o); };
   T.bigM = T.marks.filter(m => m.s.sc > 1);
   for (const m of T.marks) if (!(m.s.sc > 1)) put({ x: m.x, y: m.y, s: m.s, m });
-  const road = new Path2D(), runs = []; T.objN = 0;
+  const road = new Path2D(), runs = [], rSet = new Set(); T.objN = 0;
+  // a street stops well short of the circuit fence (never runs into it): it ends in a little turning circle instead
+  const rOK = (x, y, d) => d > hw + Wl + 150 && near(x + CW / 2, y)[0] > hw + Wl + 120 && near(x - CW / 2, y)[0] > hw + Wl + 120 && near(x, y + CH / 2)[0] > hw + Wl + 120 && near(x, y - CH / 2)[0] > hw + Wl + 120 && !(T.pit && T.pit.block(x, y));
   const hmax = (x, y, d, i) => T.y[i] < y ? Math.max(14, d - hw - Wl - 30) : 999;
   for (let ry = Math.floor((by0 - M) / CH), row = 0; ry * CH < by1 + M; ry++, row++) {
     let run = null;
@@ -327,8 +329,8 @@ function buildThemed(T) {
       if (d > M) { if (run) { runs.push(run); run = null; } continue; }
       if (inCpx(x, y)) { if (run) { runs.push(run); run = null; } continue; }
       const z = zoneOf(i), town = z.b > .4, sRow = town && ((ry % 4 + 4) % 4 === 0), sCol = town && ((rx % 5 + 5) % 5 === 0);
-      if (sRow && d > hw + Wl + 40 && !(T.pit && T.pit.block(x, y))) { road.moveTo(x - CW / 2, y); road.lineTo(x + CW / 2, y); if (!run) run = { y, a: x, b: x }; run.b = x; } else if (run) { runs.push(run); run = null; }
-      if (sCol && d > hw + Wl + 40 && !(T.pit && T.pit.block(x, y))) { road.moveTo(x, y - CH / 2); road.lineTo(x, y + CH / 2); }
+      if (sRow && rOK(x, y, d)) { road.moveTo(x - CW / 2, y); road.lineTo(x + CW / 2, y); rSet.add(rx + ',' + ry + 'r'); if (!run) run = { y, a: x, b: x }; run.b = x; } else if (run) { runs.push(run); run = null; }
+      if (sCol && rOK(x, y, d)) { road.moveTo(x, y - CH / 2); road.lineTo(x, y + CH / 2); rSet.add(rx + ',' + ry + 'c'); }
       if (sRow || sCol) continue;
       if (d < hw + Wl + 40 || wetN(x, y) || railN(x, y) || markN(x, y) || (T.pit && T.pit.block(x, y))) continue;
       if ((i > N - 90 || i < 150) && d < hw + Wl + 260) continue; // pits & stands
@@ -343,7 +345,10 @@ function buildThemed(T) {
     }
     if (run) runs.push(run);
   }
-  T.road = road;
+  T.road = road; T.roadEnds = new Path2D(); T.roadEndsW = new Path2D();
+  for (const k of rSet) { const [a, b] = k.slice(0, -1).split(',').map(Number), col = k.endsWith('c');
+    for (const s of [-1, 1]) { const nb = col ? a + ',' + (b + s) + 'c' : (a + s) + ',' + b + 'r'; if (rSet.has(nb)) continue;
+      const ex = a * CW + (col ? 0 : s * CW / 2), ey = b * CH + (col ? s * CH / 2 : 0); if (near(ex, ey)[0] > hw + Wl + 900) continue; T.roadEndsW.moveTo(ex + 44, ey); T.roadEndsW.arc(ex, ey, 44, 0, 7); T.roadEnds.moveTo(ex + 36, ey); T.roadEnds.arc(ex, ey, 36, 0, 7); } }
   if (cpx) for (const o of cpx.items(getT)) put(o);
   for (const b of T.buckets.values()) b.sort((a, c) => a.y - c.y);
   // verge trees / lanterns right behind the barriers
@@ -378,8 +383,8 @@ function drawThemedGround(T, cx, cy, vr, vc) {
   ctx.drawImage(G0.c, G0.x, G0.y, G0.w, G0.h);
   ctx.globalAlpha = .2; ctx.fillStyle = PAT.city; ctx.fillRect(cx - vr, cy - vr, vr * 2, vr * 2); ctx.globalAlpha = 1;
   ctx.lineCap = 'butt';
-  ctx.strokeStyle = T.def.walkC || 'rgba(205,200,188,.75)'; ctx.lineWidth = 74; ctx.stroke(T.road);
-  ctx.strokeStyle = T.def.streetC; ctx.lineWidth = 58; ctx.stroke(T.road);
+  ctx.strokeStyle = T.def.walkC || 'rgba(205,200,188,.75)'; ctx.lineWidth = 74; ctx.stroke(T.road); if (T.roadEndsW) { ctx.fillStyle = ctx.strokeStyle; ctx.fill(T.roadEndsW); }
+  ctx.strokeStyle = T.def.streetC; ctx.lineWidth = 58; ctx.stroke(T.road); if (T.roadEnds) { ctx.fillStyle = T.def.streetC; ctx.fill(T.roadEnds); }
   ctx.strokeStyle = 'rgba(235,225,180,.4)'; ctx.lineWidth = 2; ctx.setLineDash([18, 24]); ctx.stroke(T.road); ctx.setLineDash([]);
   ctx.lineCap = 'round';
   for (const w of T.waters) { ctx.strokeStyle = '#8f8a7d'; ctx.lineWidth = w.w + 26; ctx.stroke(w.p); ctx.strokeStyle = w.c; ctx.lineWidth = w.w; ctx.stroke(w.p); ctx.strokeStyle = 'rgba(235,250,250,.13)'; ctx.lineWidth = w.w * .5; ctx.setLineDash([60, 130]); ctx.lineDashOffset = -performance.now() / 40; ctx.stroke(w.p); ctx.setLineDash([]); ctx.lineDashOffset = 0; }

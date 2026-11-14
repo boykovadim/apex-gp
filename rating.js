@@ -57,9 +57,10 @@ window.RT = (() => {
     try { if (!e || !hexOk(e.id, 64) || store.has(e.id) || checking.has(e.id) || !hexOk(e.pubkey, 64) || !hexOk(e.sig, 128) || e.kind !== KIND || !Array.isArray(e.tags) || !e.tags.some(t => t[0] === 't' && t[1] === TAG) || typeof e.content !== 'string' || e.content.length > 4000 || !(e.created_at <= Date.now() / 1000 + 600)) return;
       checking.add(e.id); const h = await evHash(e); if (b2h(h) === e.id && await verify(h, e.pubkey, e.sig)) { store.set(e.id, e); save(); redraw(); } } catch (x) {} finally { if (e) checking.delete(e.id); }
   }
-  async function make(d, body) {
-    const e = { pubkey: pub, created_at: Math.floor(Date.now() / 1000), kind: KIND, tags: [['d', d], ['t', TAG]], content: JSON.stringify(body) }, h = await evHash(e);
-    e.id = b2h(h); e.sig = await schnorr(h, priv, rnd(32)); store.set(e.id, e); save(); redraw(); return e;
+  async function make(d, body, key) { // key: [priv, pub] to sign as someone else (the admin)
+    const kp = key ? key[0] : priv, kq = key ? key[1] : pub;
+    const e = { pubkey: kq, created_at: Math.floor(Date.now() / 1000), kind: KIND, tags: [['d', d], ['t', TAG]], content: JSON.stringify(body) }, h = await evHash(e);
+    e.id = b2h(h); e.sig = await schnorr(h, kp, rnd(32)); store.set(e.id, e); save(); redraw(); return e;
   }
 
   /* ---------- sync: fetch everything, give back what a server is missing ---------- */
@@ -89,26 +90,35 @@ window.RT = (() => {
     const nick = new Map(), races = [], setN = (k, n, at) => { const c = nick.get(k); if (!c || at >= c.at) nick.set(k, { n, at }); };
     for (const e of store.values()) { let b; try { b = JSON.parse(e.content); } catch (x) { continue; } const d = dTag(e);
       if (d === 'nick') { if (typeof b.n === 'string') setN(e.pubkey, b.n.slice(0, 12), e.created_at + 1e10); } // a player's own word beats any result row
-      else if (d && d.startsWith('race-') && Array.isArray(b.res)) { const rows = b.res.filter(x => x && hexOk(x.k, 64)).slice(0, 11); if (new Set(rows.map(x => x.k)).size < 2 || new Set(rows.map(x => x.k)).size !== rows.length) continue; rows.sort((x, y) => x.p - y.p); rows.forEach((x, i) => { x.p = i + 1; setN(x.k, String(x.n || 'Player').slice(0, 12), e.created_at); }); races.push({ at: e.created_at, tr: String(b.tr || ''), laps: b.laps | 0, rows }); } }
+      else if (d && d.startsWith('ren-') && e.pubkey === ADMIN && hexOk(b.k, 64) && typeof b.n === 'string' && b.n.trim()) setN(b.k, b.n.trim().slice(0, 12), e.created_at + 2e10); // the admin's fix beats everything
+      else if (d && d.startsWith('race-') && Array.isArray(b.res)) { const rows = b.res.filter(x => x && hexOk(x.k, 64)).slice(0, 11); if (new Set(rows.map(x => x.k)).size < 2 || new Set(rows.map(x => x.k)).size !== rows.length) continue; rows.sort((x, y) => x.p - y.p); rows.forEach((x, i) => { x.p = i + 1; setN(x.k, String(x.n || 'Player').slice(0, 12), e.created_at); }); races.push({ at: e.created_at, tr: String(b.tr || ''), laps: b.laps | 0, rl: !!b.rl, tmode: !!b.tmode, rows }); } }
     races.sort((a, b) => b.at - a.at); return { nick, races };
   }
+  /* with different cars: where each driver 'should' finish among the people, by the strength of the car */
+  const power = t => { const s = TEAMS[t]; return s ? s.spd * .5 + s.acc * .2 + s.grip * .3 : 1; };
+  function expected(r) { if (!r.rl || r.rows.some(x => !(x.tm >= 0 && x.tm < TEAMS.length))) return null; const o = r.rows.slice().sort((a, b) => power(b.tm) - power(a.tm)), m = new Map(); o.forEach((x, i) => m.set(x, i + 1)); return m; }
   function table(d, kind) { const m = new Map();
-    for (const r of d.races) for (const x of r.rows) { if ((x.d === 'm' ? 'm' : 'p') !== kind) continue; let s = m.get(x.k); if (!s) m.set(x.k, s = { k: x.k, pts: 0, w: 0, n: 0, km: 0 }); s.pts += F1[x.p - 1] || 0; s.n++; if (x.p === 1) s.w++; s.km += Math.max(0, Math.min(500, +x.km || 0)); }
+    for (const r of d.races) { const exp = expected(r); for (const x of r.rows) { if ((x.d === 'm' ? 'm' : 'p') !== kind) continue; let s = m.get(x.k); if (!s) m.set(x.k, s = { k: x.k, pts: 0, w: 0, n: 0, km: 0 }); const fp = x.o > 0 ? x.o : x.p; s.pts += (F1[fp - 1] || 0) + (exp ? 3 * Math.max(0, exp.get(x) - x.p) : 0); s.n++; if (fp === 1) s.w++; if (fp <= 3) s.pd = (s.pd || 0) + 1; s.km += Math.max(0, Math.min(500, +x.km || 0)); } }
     return [...m.values()].sort((a, b) => b.pts - a.pts || b.w - a.w || a.n - b.n); }
 
   /* ---------- screen ---------- */
-  let tab = 'p', page = 0;
+  let tab = 'p', page = 0, adm = null;
+  const ADMIN = 'df0b39db94c6811067d287888b870482291fec3a229890e0997ab4cd07511b04';
+  async function adminKey(pw) { // the password never leaves the browser: it is stretched into a signing key, only its public half is in the code
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits']);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: new TextEncoder().encode('apexgp-admin-v1'), iterations: 150000, hash: 'SHA-256' }, base, 256));
+    const k = md(b2n(bits), N - 1n) + 1n, kb = h2b(n2h(k)); return [kb, n2h(aff(mul(k, GP))[0])]; }
   function status() { const e = document.getElementById('rtStatus'); if (!e) return; const n = data().races.length; e.textContent = busy ? 'Обновляем…' : lastOk ? 'Гонок в зачёте: ' + n + ' · считаются только гонки с друзьями' : lastTry ? 'Нет связи с серверами, показываем сохранённое · гонок: ' + n : ''; }
   function draw() {
     const d = data(), name = k => esc((d.nick.get(k) || {}).n || 'Player'), tb = $('#rtTable'); let pages = 1, html = '';
     $$('#rtTabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
     if (tab === 'h') { pages = Math.max(1, Math.ceil(d.races.length / PAGE)); page = clamp(page, 0, pages - 1);
-      html = '<tr class="hd"><td>ДАТА</td><td>ТРАССА</td><td>ПОБЕДИТЕЛЬ</td><td class="t">ПИЛОТОВ</td></tr>' + d.races.slice(page * PAGE, page * PAGE + PAGE).map(r => { const dt = new Date(r.at * 1000), w = r.rows[0]; return `<tr class="${r.rows.some(x => x.k === pub) ? 'me' : ''}"><td>${String(dt.getDate()).padStart(2, '0')}.${String(dt.getMonth() + 1).padStart(2, '0')} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}</td><td>${esc(r.tr)}</td><td>${name(w.k)}</td><td class="t">${r.rows.length}</td></tr>`; }).join('') || '<tr><td colspan="4" class="t">Пока нет гонок</td></tr>'; }
+      html = '<tr class="hd"><td>ДАТА</td><td>ТРАССА</td><td>ПОБЕДИТЕЛЬ</td><td class="t">ПИЛОТОВ</td></tr>' + d.races.slice(page * PAGE, page * PAGE + PAGE).map(r => { const dt = new Date(r.at * 1000), w = r.rows[0]; return `<tr class="${r.rows.some(x => x.k === pub) ? 'me' : ''}"><td>${String(dt.getDate()).padStart(2, '0')}.${String(dt.getMonth() + 1).padStart(2, '0')} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}</td><td>${esc(r.tr)}${r.tmode ? ' · команды' : ''}${r.rl ? ' · разные машины' : ''}</td><td>${name(w.k)}</td><td class="t">${r.rows.length}</td></tr>`; }).join('') || '<tr><td colspan="4" class="t">Пока нет гонок</td></tr>'; }
     else { const t = table(d, tab); pages = Math.max(1, Math.ceil(t.length / PAGE)); page = clamp(page, 0, pages - 1);
-      const row = (s, i) => `<tr class="${s.k === pub ? 'me' : ''}"><td>${i + 1}</td><td>${name(s.k)}</td><td class="t">${s.pts}</td><td class="t">${s.w}</td><td class="t">${s.n}</td><td class="t">${Math.round(s.km)}</td></tr>`;
-      html = '<tr class="hd"><td></td><td>ПИЛОТ</td><td class="t">ОЧКИ</td><td class="t">ПОБЕДЫ</td><td class="t">ГОНКИ</td><td class="t">КМ</td></tr>' + t.slice(page * PAGE, page * PAGE + PAGE).map((s, i) => row(s, page * PAGE + i)).join('') || '';
+      const wr = s => Math.round(100 * s.w / Math.max(1, s.n)) + '%', row = (s, i) => `<tr class="${s.k === pub ? 'me' : ''}"><td>${i + 1}</td><td>${name(s.k)}${adm ? ` <button class="rt-ren" data-k="${s.k}">✎</button>` : ''}</td><td class="t">${s.pts}</td><td class="t">${s.w}</td><td class="t" title="подиумы: ${s.pd || 0}">${wr(s)}</td><td class="t">${s.n}</td><td class="t">${Math.round(s.km)}</td></tr>`;
+      html = '<tr class="hd"><td></td><td>ПИЛОТ</td><td class="t">ОЧКИ</td><td class="t">ПОБЕДЫ</td><td class="t">ВИНРЕЙТ</td><td class="t">ГОНКИ</td><td class="t">КМ</td></tr>' + t.slice(page * PAGE, page * PAGE + PAGE).map((s, i) => row(s, page * PAGE + i)).join('') || '';
       const mi = t.findIndex(s => s.k === pub); if (mi >= 0 && (mi < page * PAGE || mi >= page * PAGE + PAGE)) html += row(t[mi], mi);
-      if (!t.length) html += '<tr><td colspan="6" class="t">Пока никого: сыграйте гонку с друзьями</td></tr>'; }
+      if (!t.length) html += '<tr><td colspan="7" class="t">Пока никого: сыграйте гонку с друзьями</td></tr>'; }
     tb.innerHTML = html; $('#rtPage').textContent = (page + 1) + ' / ' + pages; $('#rtPrev').disabled = page <= 0; $('#rtNext').disabled = page >= pages - 1; status(); fitUI();
   }
   function open() { tab = dev(); page = 0; $('#rtNick').value = S.name || ''; show('rating'); draw(); sync(); }
@@ -119,6 +129,11 @@ window.RT = (() => {
     const save1 = () => { const v = $('#rtNick').value.trim().slice(0, 12); if (!v || v === S.name) return; S.name = v; saveS(); setNick(v); toast('Ник сохранён: ' + v); };
     $('#rtNick').addEventListener('change', save1); $('#rtNick').addEventListener('blur', save1);
     setTimeout(sync, 5000);
+    // admin: Ctrl+Shift+K on the rating screen (on a phone: hold the title for 3 s), then the password → names can be fixed for everyone
+    const ask = async () => { if (adm) { adm = null; draw(); toast('Режим админа выключен'); return; } const pw = prompt('Пароль администратора'); if (!pw) return; const k = await adminKey(pw); if (k[1] !== ADMIN) { toast('Неверный пароль'); return; } adm = k; draw(); toast('Режим админа: ✎ рядом с ником'); };
+    addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.code === 'KeyK' && !document.getElementById('rating').classList.contains('hidden')) { e.preventDefault(); ask(); } });
+    { const t = document.querySelector('#rating .g-head .lbl'); let ht = 0; if (t) { t.addEventListener('pointerdown', () => { ht = setTimeout(ask, 3000); }); ['pointerup', 'pointerleave', 'pointercancel'].forEach(n => t.addEventListener(n, () => clearTimeout(ht))); } }
+    $('#rtTable').addEventListener('click', async e => { const b = e.target.closest('.rt-ren'); if (!b || !adm) return; const k = b.dataset.k, cur = (data().nick.get(k) || {}).n || ''; const n = (prompt('Новое имя для «' + cur + '»', cur) || '').trim().slice(0, 12); if (!n || n === cur) return; await make('ren-' + k.slice(0, 16), { k, n }, adm); sync(); toast('Имя исправлено: ' + n); });
   }
-  return { ui, open, sync, setNick, publishRace, accept, get pub() { return pub; }, get dev() { return dev(); }, _schnorr: schnorr, _verify: verify, _h2b: h2b, _data: data, _table: table, _make: make, get _store() { return store; } };
+  return { _adminKey: pw => adminKey(pw), ui, open, sync, setNick, publishRace, accept, get pub() { return pub; }, get dev() { return dev(); }, _schnorr: schnorr, _verify: verify, _h2b: h2b, _data: data, _table: table, _make: make, get _store() { return store; } };
 })();
