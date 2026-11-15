@@ -57,7 +57,7 @@ const TOD = [
   { sh: [4, 6], sa: .2, amb: [112, 108, 156], band: [150, 146, 108] },
   { sh: [4, 6], sa: .18, amb: [150, 156, 205], band: [108, 100, 56] }];
 
-let RS = 1, FLARE = null, RES = 1, tw = TS, q = -1, fN = 0, cap = 320, lm = null, lg = null, SM = null, CL = null;
+let FLARE = null, RES = 1, tw = TS, q = -1, fN = 0, cap = 320, lm = null, lg = null, SM = null, CL = null;
 const tiles = new Map(), pool = [], PS = [];
 const st = { armed: false, wait: false, gasAt: -1e9, t0: 0, fin: false, fw: 0, fwT: 0, conf: 0, flash: 0, bolt: 6, birds: null, heli: null, cold: true, settle: 0, ema: 16, zoomT: 0, ers: -1, jets: null, jetT: 14, flT: 0 };
 
@@ -358,14 +358,14 @@ function bake(T, t) {
 /* =====================================================================
    TILE CACHE
    ===================================================================== */
-function dprCap() { const k = q < 0 ? (S.gfx === 'ultra' ? 3 : S.gfx === 'hi' ? 2 : S.gfx === 'lo' ? 0 : 1) : q; return [1, 1.25, 1.5, 2][k]; }
+function renderDpr() { return Math.min(2, window.devicePixelRatio || 1); }
 function zoomK() { return G.mode === 'attract' && !CFG ? 1 : clamp(S.zoom || 1, .45, 1.6); }
 function flush() { for (const t of tiles.values()) if (pool.length < 96) pool.push(t.c); tiles.clear(); st.cold = true; }
 function setRes() { // bake at (roughly) the closest zoom the camera reaches
   if (q < 0) q = S.gfx === 'ultra' ? 3 : S.gfx === 'hi' ? 2 : S.gfx === 'mid' ? 1 : S.gfx === 'lo' ? 0 : 1; // auto starts at medium and drops to light if the frames get slow
   cap = [120, 280, 600, 1100][q];
-  { const want = Math.min(dprCap(), window.devicePixelRatio || 1) * RS; if (Math.abs(want - DPR) > .01) { DPR = want; cv.width = Math.round(innerWidth * DPR); cv.height = Math.round(innerHeight * DPR); lm = null; } } // fewer pixels on the lower settings, and when the frames get slow
-  const base = Math.min(innerHeight / 560, innerWidth / 305) * (isDesk ? 1 : .5) * clamp(S.zoom || 1, .45, 1.6) * DPR / RS * .85, r = clamp(Math.round(base * 4) / 4, .5, [.75, 1.25, 1.75, 2.5][q]);
+  const base = Math.min(innerHeight / 560, innerWidth / 305) * (isDesk ? 1 : .5) * zoomK() * DPR;
+  const r = Math.max(.5, Math.ceil(base * 4) / 4);
   if (r !== RES) { RES = r; tw = TS / RES; flush(); }
 }
 function tile(T, a, b) { const c = pool.pop() || mk(TS + 2, TS + 2), t = { c, g: c.getContext('2d', { alpha: false }), x: a * tw, y: b * tw, f: fN }; bake(T, t); tiles.set(a + ',' + b, t); return t; }
@@ -705,11 +705,19 @@ function trails(g, now, inV) { // light ribbons off the rear wing
   g.globalCompositeOperation = 'source-over';
 }
 function render(dt) {
-  const T = G.track, g = ctx, W = cv.width, H = cv.height, z = cam.z * DPR, F = prep(T), td = TOD[F.L.tod], now = performance.now() / 1000; fN++; speedTick(dt);
+  if (DPR !== renderDpr()) resize();
   if (st.zoomT > 0 && (st.zoomT -= dt) <= 0) setRes();
   st.ema = lerp(st.ema, dt * 1000, .03);
-  // smoothness first, on every setting: if a frame takes longer than ~19 ms the canvas draws fewer pixels (down to half), and takes them back when there is time
-  if ((st.rsT = (st.rsT || 0) + dt) > 1.1 && !st.cold && !document.hidden) { st.rsT = 0; const old = RS; if (st.ema > 19 && RS > .5) RS = Math.max(.5, RS * .86); else if (st.ema < 11.5 && RS < 1) RS = Math.min(1, RS * 1.07); if (RS !== old) { st.ema = st.ema > 19 ? 17 : st.ema; setRes(); } } if (S.gfx === 'auto' || !S.gfx) { if ((G.mode === 'race' || G.mode === 'attract') && !st.cold && (st.settle += dt) > 2.5 && st.ema > 23 && q > 0) { q--; st.settle = 0; st.ema = 16; setRes(); } }
+  if ((S.gfx === 'auto' || !S.gfx) && (G.mode === 'race' || G.mode === 'attract') &&
+      !st.cold && (st.settle += dt) > 2.5 && st.ema > 23 && q > 0) {
+    q--;
+    st.settle = 0;
+    st.ema = 16;
+    setRes();
+  }
+  const T = G.track, g = ctx, W = cv.width, H = cv.height, z = cam.z * DPR, F = prep(T), td = TOD[F.L.tod], now = performance.now() / 1000;
+  fN++;
+  speedTick(dt);
   g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over'; g.setLineDash([]);
   const sk = cam.shake, ox = W / 2 + rand(-sk, sk) * DPR, oy = H / 2 + rand(-sk, sk) * DPR;
   g.setTransform(z, 0, 0, z, ox - cam.x * z, oy - cam.y * z);
@@ -782,7 +790,14 @@ function ui() {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(flush);
   sync();
 }
-function resize() { lm = null; setRes(); }
+function resize() {
+  DPR = renderDpr();
+  const width = Math.round(innerWidth * DPR), height = Math.round(innerHeight * DPR);
+  if (cv.width !== width) cv.width = width;
+  if (cv.height !== height) cv.height = height;
+  lm = null;
+  setRes();
+}
 
-return { get rs() { return RS; }, dprCap, speedK, render, effects, pre, onRace, ui, sync, resize, zoomK, puff, hit, bump, skid, flush, look: LOOK, get q() { return q; }, get res() { return RES; }, get tiles() { return tiles.size; }, get parts() { return PS.length; } };
+return { speedK, render, effects, pre, onRace, ui, sync, resize, zoomK, puff, hit, bump, skid, flush, look: LOOK, get q() { return q; }, get res() { return RES; }, get tiles() { return tiles.size; }, get parts() { return PS.length; } };
 })();

@@ -1414,10 +1414,7 @@ function puff(x, y, c, kind) {
 /* =====================================================================
    RENDER
    ===================================================================== */
-function resize() {
-  DPR = Math.min(FX.dprCap(), window.devicePixelRatio || 1) * FX.rs;
-  cv.width = Math.round(innerWidth * DPR); cv.height = Math.round(innerHeight * DPR); FX.resize();
-}
+function resize() { FX.resize(); }
 addEventListener('resize', resize);
 addEventListener('resize', () => { if (!$('#menu').classList.contains('hidden')) refreshMenu(); });
 /* phones: the part of the screen between the top panels and the controls; the car is framed in its middle */
