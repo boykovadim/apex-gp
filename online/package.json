@@ -1,0 +1,1 @@
+{"name":"apex-gp-online","private":true,"type":"module","engines":{"node":">=22.13.0"},"scripts":{"start":"node server/standalone.mjs"},"dependencies":{"ws":"8.23.0"}}

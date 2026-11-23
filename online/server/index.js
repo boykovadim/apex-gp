@@ -1,12 +1,66 @@
 // The host owns simulation. The relay stores ordered control and fallback telemetry batches.
 const json = (data, status = 200) => Response.json(data, {status, headers:{'cache-control':'no-store'}});
 const ttl = 45_000;
+// A socket pair in the same process can exchange telemetry immediately. Durable
+// control messages still go through the acknowledged queue across all regions.
+const sockets = new Map();
+const telemetry = new Set(['s','f','in','pg','po']);
+function write(socket, data) {
+  if (socket.readyState !== 1 || socket.bufferedAmount > 131072) return false;
+  try { socket.send(JSON.stringify(data)); return true; } catch { return false; }
+}
+export function attachRelay(socket, db) {
+  let pilot, authenticating = false, closed = false;
+  const guard = setTimeout(()=>socket.close(1008,'Authentication timeout'),8000);
+  function disconnect() {
+    closed=true;clearTimeout(guard);
+    if (!pilot || sockets.get(pilot.id)?.socket !== socket) return;
+    sockets.delete(pilot.id);
+    for(const entry of sockets.values()) if(entry.room===pilot.room && (pilot.id===pilot.host || entry.id===pilot.host))
+      write(entry.socket,{peer:pilot.id,up:false});
+  }
+  socket.addEventListener('close',disconnect);
+  socket.addEventListener('error',disconnect);
+  socket.addEventListener('message',async event=>{
+    try {
+      if(typeof event.data!=='string' || event.data.length>32768) return socket.close(1009,'Invalid frame');
+      const frame=JSON.parse(event.data);
+      if(!pilot){
+        if(authenticating || !frame.auth) return;
+        authenticating=true;
+        const row=await db.prepare('SELECT p.id,p.room,r.host FROM pilots p JOIN rooms r ON r.id=p.room WHERE p.id=? AND p.token=? AND r.seen>?').bind(String(frame.id),String(frame.token),Date.now()-ttl).first();
+        if(closed)return;
+        if(!row)return socket.close(1008,'Unknown session');
+        pilot=row;clearTimeout(guard);
+        sockets.get(row.id)?.socket.close(1000,'Reconnected');
+        sockets.set(row.id,{...row,socket});
+        for(const other of sockets.values()){
+          if(other.room!==row.room || other.id===row.id || (row.id!==row.host && other.id!==row.host)) continue;
+          write(socket,{peer:other.id,up:true});write(other.socket,{peer:row.id,up:true});
+        }
+        return;
+      }
+      if(sockets.get(pilot.id)?.socket!==socket || !telemetry.has(frame.m?.t))return;
+      const other=sockets.get(frame.to);
+      if(!other || other.room!==pilot.room || (pilot.id!==pilot.host && other.id!==pilot.host)){
+        write(socket,{peer:frame.to,up:false});return;
+      }
+      write(other.socket,{from:pilot.id,m:frame.m});
+    } catch {socket.close(1008,'Invalid message');}
+  });
+}
 export default {async fetch(req, env) {
   const url = new URL(req.url);
   if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(req);
   const db = env.DB, now = Date.now();
   const query = (sql, ...params) => db.prepare(sql).bind(...params);
   const route = url.pathname.slice(5);
+  if (route === 'live' && req.headers.get('upgrade')?.toLowerCase()==='websocket') {
+    if (req.headers.get('origin')!==url.origin) return json({},403);
+    const [client,server]=Object.values(new WebSocketPair());
+    server.accept();attachRelay(server,db);
+    return new Response(null,{status:101,webSocket:client});
+  }
   if (req.method === 'GET' && route === 'rooms') {
     const {results} = await query('SELECT r.id,r.name,r.track,r.capacity,count(p.id) AS count FROM rooms r LEFT JOIN pilots p ON p.room=r.id AND p.seen>? WHERE r.seen>? GROUP BY r.id ORDER BY r.seen DESC LIMIT 80',now-ttl,now-ttl).all();
     return json(results);
@@ -33,6 +87,7 @@ export default {async fetch(req, env) {
   if (!pilot || pilot.seen<now-ttl) return json({},410);
   const host=pilot.host===pilot.id;
   if (route==='leave') {
+    sockets.get(pilot.id)?.socket.close(1000,'Left room');
     await (host ? query('DELETE FROM rooms WHERE id=?',pilot.room) : query('DELETE FROM pilots WHERE id=?',pilot.id)).run();
     return json({});
   }

@@ -34,7 +34,7 @@ const RaceNetwork = (() => {
     epoch++;
     const s=session; session=null;
     if(!s) return;
-    clearTimeout(s.timer);
+    clearTimeout(s.timer);clearTimeout(s.socketRetry);s.socket?.close();
     for(const link of s.links.values()) link.close();
     api('leave',{id:s.id,token:s.token},true).catch(()=>{});
   }
@@ -55,25 +55,48 @@ const RaceNetwork = (() => {
         Net.hc=linkFor(s,s.host);
         Net.hc.send({t:'hi',name:myName(),team:S.team,rk:RT.pub,dv:RT.dev,sk:S.skin|0});
       }
+      openSocket(s);
       poll(s);
     } catch(e) {
       if(generation!==epoch)return;
       netClose();netStatus(e.status===409?'Комната заполнена или хост вышел.':'Не удалось открыть соединение. Попробуй ещё раз.');
     }
   }
+  function openSocket(s){
+    if(session!==s)return;
+    s.near=new Set();
+    const url=new URL('/api/live',location.href);
+    url.protocol=url.protocol==='https:'?'wss:':'ws:';
+    let socket;
+    try {socket=s.socket=new WebSocket(url);} catch {return;}
+    socket.onopen=()=>socket.send(JSON.stringify({auth:true,id:s.id,token:s.token}));
+    socket.onmessage=({data})=>{
+      if(session!==s)return;
+      const frame=JSON.parse(data);
+      if(frame.peer){if(frame.up)s.near.add(frame.peer);else s.near.delete(frame.peer);}
+      else if(fast.has(frame.m?.t) && s.links.has(frame.from)) deliver(s,frame.from,frame.m);
+    };
+    socket.onclose=()=>{
+      s.near.clear();
+      if(session===s)s.socketRetry=setTimeout(()=>openSocket(s),10000);
+    };
+  }
   function linkFor(s,id){
     if(s.links.has(id)) return s.links.get(id);
     let pc=null, channel=null;
+    const pendingIce=[];
+    const hasSocket=()=>s.socket?.readyState===1 && s.near?.has(id);
     const signal=data=>s.out.push({to:id,m:{t:'signal',...data}});
     const bind=c=>{
       channel=c;
       c.onmessage=e=>{if(session!==s)return;const m=JSON.parse(e.data);if(fast.has(m.t)) deliver(s,id,m);};
     };
-    const link={open:true,get broker(){return channel?.readyState!=='open';},
+    const link={open:true,get route(){return channel?.readyState==='open'?'ПРЯМОЙ':hasSocket()?'WEBSOCKET':'HTTP';},get broker(){return channel?.readyState!=='open';},
       send(m){
         if(!this.open)return;
         if(fast.has(m.t)){
           if(channel?.readyState==='open' && channel.bufferedAmount<65536){try{channel.send(JSON.stringify(m));return;}catch{}}
+          if(hasSocket() && s.socket.bufferedAmount<65536){try{s.socket.send(JSON.stringify({to:id,m}));return;}catch{}}
           s.latest.set(id+'/'+m.t,{to:id,m});
         } else s.out.push({to:id,m});
       },
@@ -81,13 +104,14 @@ const RaceNetwork = (() => {
         if(!window.RTCPeerConnection)return;
         try{
           if(!pc){
-            pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.cloudflare.com:3478'}]});
+            pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun.cloudflare.com:3478'}]});
             pc.onicecandidate=e=>{if(e.candidate && session===s) signal({ice:e.candidate.toJSON()});};
             pc.ondatachannel=e=>bind(e.channel);
           }
           if(!data){bind(pc.createDataChannel('race',{ordered:false,maxRetransmits:0}));const offer=await pc.createOffer();signal({desc:offer});await pc.setLocalDescription(offer);}
           else if(data.desc){await pc.setRemoteDescription(data.desc);if(data.desc.type==='offer'){const answer=await pc.createAnswer();signal({desc:answer});await pc.setLocalDescription(answer);}}
-          else if(data.ice) await pc.addIceCandidate(data.ice);
+          else if(data.ice) pendingIce.push(data.ice);
+          if(pc.remoteDescription)while(pendingIce.length)await pc.addIceCandidate(pendingIce.shift());
         }catch{/* The HTTP relay continues whenever direct negotiation fails. */}
       },
       close(){this.open=false;pc?.close();}
@@ -126,8 +150,8 @@ const RaceNetwork = (() => {
       s.cursor=result.cursor;s.last=Date.now();
       if(Net.host) for(const [id,l] of Net.conns) if(!result.members.includes(id)){hostDrop(id,l);l.close();s.links.delete(id);}
       const active=G.net==='host'||G.net==='client';
-      const relay=[...s.links.values()].some(l=>l.open && l.broker);
-      s.timer=setTimeout(()=>poll(s),active && relay?45:active?240:280);return;
+      const relay=[...s.links.values()].some(l=>l.open && l.route==='HTTP');
+      s.timer=setTimeout(()=>poll(s),active && relay?5:active?240:180);return;
     }
   }
   addEventListener('pagehide',close);

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: apex-grid-racing
+    runtime: node
+    rootDir: online
+    region: frankfurt
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/rooms
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.0
