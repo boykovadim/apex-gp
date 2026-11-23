@@ -863,7 +863,7 @@ function startRace(grid, laps, net, trk, o) {
   G.me = G.cars.findIndex(c => c.human === 'local'); G.follow = Math.max(0, G.me);
   G.pRef = 0; G.paV = 1; { const bots = G.cars.filter(c => !c.human); const same = new Set(G.cars.map(c => cpace(c.team))).size < 2; bots.forEach(c => { c.pa = 1; c.spread = carGap(formPos(c.team)) * (same ? rand(.995, 1.006) : rand(.999, 1.001)); if (S.diff === 2 && G.sess === 'race') c.pa = clamp(G.track.refLap / (humLap(G.track) * PRO_FLOOR * c.spread) / c.skill, .8, 1.1); }); G.pRefS = 1; if (G.sess === 'race') { const T = G.track, mine = grid.find(g => g.human === 'local' && g.qt); if (mine) { G.pRef = mine.qt * 1.012; G.pRefS = carGap(mine.team); } grid.forEach((g, k) => { const c = G.cars[k]; if (!g.human && g.qt && c) c.pa = clamp(T.refLap / (c.skill * g.qt * 1.012), .75, 1.25); }); } if (bots.length) G.paV = bots.reduce((s, q) => s + q.pa * q.skill, 0) / bots.length; }
   G.laps = laps; G.net = net; G.t = 0; G.lt = 0; G.phase = net === 'attract' ? 'race' : 'grid'; G.lightsOut = 5 + rand(.4, 1.3);
-  G.rated = false; G.statDone = false; G.chDone = false; G.pdOn = false; G.wetRace = false; G.fl = 0; G.flC = null; G.skidN = 0; G.parts.length = 0; G.order = []; G.resT = -1; G.snaps = []; G.paused = false; G.shownLights = -1;
+  G.rated = false; G.statDone = false; G.chDone = false; G.pdOn = false; G.wetRace = false; G.fl = 0; G.flC = null; G.skidN = 0; G.parts.length = 0; G.order = []; G.resT = -1; G.snaps = []; G.playback = {}; G.paused = false; G.shownLights = -1;
   G.mode = net === 'attract' ? 'attract' : 'race';
   FX.onRace(); sfx('reset');
   if (G.sess === 'race' && net !== 'client' && net !== 'attract' && Math.random() < .2) { const b = G.cars.filter(c => !c.human); if (b.length) { const j = b[Math.random() * b.length | 0]; j.fs = 1; j.react = 0; } } // now and then a bot jumps the start
@@ -1152,6 +1152,8 @@ function collide() {
   const cs = G.cars;
   for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
     const A = cs[i], B = cs[j]; if (Math.abs(A.x - B.x) > 120 || Math.abs(A.y - B.y) > 120) continue;
+    // Online drivers simulate their own car. A delayed opponent cannot apply an impulse.
+    if (G.net === 'host' && (A.human || B.human)) continue;
     if (A.inPit || B.inPit) continue; // no jams in the pit lane
     const gi = Math.abs(A.idx - B.idx); if (Math.min(gi, G.track.N - gi) > 100) continue; // other level / other part of the lap
     const soft = G.phase === 'race' && G.t < 3.5;
@@ -1387,7 +1389,7 @@ function simStep(dt) {
   } else G.t += dt;
   for (const c of G.cars) {
     const remote = c.human && c.human !== 'local' && !c.fin && c.pose;
-    if (remote && !c.pitS) netFollow(c, dt);
+    if (remote && !c.pitS) netFollow(c);
     pitTick(c, dt);
     if (G.opts.tyres && G.sess !== 'quali' && G.phase === 'race' && c.wear > 0) { const sl = Math.min(1, c.slide || 0); const off = c.surf === 1 || c.surf === 2 || c.surf === 4; c.wear = Math.max(0, c.wear - tyreFx(c).r * (Math.max(0, c.vF) * (c.surf === 2 ? 1.7 : off ? 1.35 : 1) * (1 + (off ? .5 : 2.2) * sl) + (sl > .3 && !off ? 200 * sl : 0)) * dt / G.track.len); } // slides and lock-ups chew the rubber; grass and gravel cost a little more than tarmac, never a set in one lap
     if (c.human === 'local' && !c.fin) { c.thr = In.thr; c.brk = In.brk; c.steer = In.steer; }
@@ -1396,7 +1398,7 @@ function simStep(dt) {
   }
   weatherTick(dt);
   collide();
-  for (const c of G.cars) { const rm = c.human && c.human !== 'local' && !c.fin && c.pose && !c.pitS; trackPos(c, rm ? c.pose[6] : null); if (!rm) barrier(c); else c.inPit = !!c.pose[9]; loopT(c); }
+  for (const c of G.cars) { const rm = c.human && c.human !== 'local' && !c.fin && c.pose && !c.pitS; trackPos(c, rm ? (c.renderPose || c.pose)[6] : null); if (!rm) barrier(c); else c.inPit = !!(c.renderPose || c.pose)[9]; loopT(c); }
   if (G.sess === 'quali' && !G.qdone && G.net !== 'client' && (G.cars.every(c => !c.human || c.qt) || G.t > 150)) qEnd();
   if ((G.step = (G.step || 0) + 1) % 6 === 0) towCalc();
   if (G.mode === 'attract' && G.cars.some(c => c.lap > 30)) startAttract();
@@ -2090,7 +2092,16 @@ function hostData(conn, uid, d) {
     const c = G.cars.find(c => c.human === uid), k = clamp(d.k | 0, 0, 3); if (c && c.pitS) { if (!c.pitSet) c.pitSel = k; } else if (c && c.inPit) c.pitPre = k;
   } else if (d.t === 'in') {
     const c = G.cars.find(c => c.human === uid);
-    if (c) { c.thr = clamp(+d.a || 0, 0, 1); c.brk = clamp(+d.b || 0, 0, 1); c.steer = clamp(+d.s || 0, -1, 1); if (Array.isArray(d.p) && d.p.length >= 10 && d.p[6] >= 0 && d.p[6] < G.track.N) { const n = performance.now(), ts = +d.ts || n; if (ts >= (c.poseTs || 0)) { if (c.pose && ts > c.poseTs + 5) c.poseW = clamp(wrapA(d.p[2] - c.pose[2]) / ((ts - c.poseTs) / 1000), -4, 4); const off = n - ts; c.poseO = c.poseO == null || off < c.poseO ? off : c.poseO + (off - c.poseO) * .02; c.poseS = ts + c.poseO; c.pose = d.p; c.poseTs = ts; c.poseR = +d.r || 0; } } }
+    if (!c) return;
+    const p = d.p, ts = Number.isFinite(d.ts) ? d.ts : performance.now();
+    if (Array.isArray(p) && p.length >= 10 && p.every(Number.isFinite) && p[6] >= 0 && p[6] < G.track.N) {
+      c.poseClock ||= {};
+      c.poses ||= [];
+      if (!bufferPose(c.poses, c.poseClock, ts, p, conn.route === 'HTTP')) return;
+      c.pose = p;
+      c.poseR = +d.r || 0;
+    }
+    c.thr = clamp(+d.a || 0, 0, 1); c.brk = clamp(+d.b || 0, 0, 1); c.steer = clamp(+d.s || 0, -1, 1);
   }
 }
 function bcast(m) { for (const c of Net.conns.values()) if (c.open) c.send(m); }
@@ -2121,16 +2132,46 @@ function rateRace(force) {
   if (rows.length < 2) return; RT.publishRace({ v: 1, tr: T.def.name, laps: G.laps, rl: G.opts.rl ? 1 : 0, tmode: G.opts.tm ? 1 : 0, res: rows }).then(ev => bcast({ t: 'rt', ev })).catch(e => console.warn('rating', e));
 }
 /* snapshots are placed on the host's own clock, so a burst of late packets never reads as a burst of motion */
-function pushSnap(s) {
-  const n = performance.now(), L = G.snaps[G.snaps.length - 1]; if (L && s.ck != null && L.ck != null && s.ck <= L.ck) return; s.rt = n;
-  if (s.ck != null) { const off = n - s.ck; Net.cOff = Net.cOff == null || off < Net.cOff ? off : Net.cOff + (off - Net.cOff) * .02; s.st = s.ck + Net.cOff; } else s.st = n;
-  G.snaps.push(s); if (G.snaps.length > 12) G.snaps.shift();
+// Keep sender time separate from arrival time: relay packets often arrive in bursts.
+function bufferPose(samples, clock, stamp, data, http) {
+  const now = performance.now(), last = samples[samples.length - 1];
+  if (last && stamp <= last.st) return false;
+  const gap = last ? now - last.rt : 0;
+  clock.delay = clamp(Math.max(http ? 320 : 95, gap * 1.25, (clock.delay || 0) - gap * .025), 95, 1100);
+  const offset = now - stamp;
+  clock.offset = last ? Math.min(offset, clock.offset + gap * .001) : offset;
+  data.rt = now; data.st = stamp;
+  samples.push(data);
+  if (samples.length > 80) samples.shift();
+  return true;
 }
-/* a friend's car on the host's screen: predicted forward to "now" from its last pose, then eased in */
-function netFollow(c, dt) {
-  const p = c.pose, now = performance.now(), t = clamp((now - (c.poseS || now)) / 1000 + (c.poseR || 0) / 2000, 0, .4), om = c.poseW || 0, sp = Math.hypot(p[3], p[4]), va = Math.atan2(p[3], -p[4]) + om * t / 2;
-  const tx = p[0] + Math.sin(va) * sp * t, ty = p[1] - Math.cos(va) * sp * t, q = Math.hypot(tx - c.x, ty - c.y) > 450 ? 1 : 1 - Math.exp(-dt * 13);
-  c.x = lerp(c.x, tx, q); c.y = lerp(c.y, ty, q); c.h += wrapA(p[2] + om * t - c.h) * q; c.vx = p[3]; c.vy = p[4]; c.vF = p[5]; c.slide = p[7]; c.surf = p[8];
+function posePair(samples, clock) {
+  const now = performance.now(), first = samples[0], last = samples[samples.length - 1];
+  const target = now - clock.offset - clock.delay;
+  if (clock.cursor == null || now - clock.frame > 1500 || last.st - clock.cursor > 1800) {
+    clock.cursor = clamp(target, first.st, last.st);
+  } else {
+    const elapsed = now - clock.frame;
+    const rate = clamp(1 + (target - clock.cursor - elapsed) / 350, .55, 1.35);
+    clock.cursor = clamp(clock.cursor + elapsed * rate, first.st, last.st);
+  }
+  clock.frame = now;
+  let i = samples.length - 1;
+  while (i > 0 && samples[i - 1].st > clock.cursor) i--;
+  const a = samples[Math.max(0, i - 1)], b = samples[i];
+  return { a, b, k: a === b ? 1 : (clock.cursor - a.st) / (b.st - a.st) };
+}
+function pushSnap(s) {
+  if (G.net !== 'client' || G.mode !== 'race') return;
+  bufferPose(G.snaps, G.playback, s.ck ?? performance.now(), s, Net.hc?.route === 'HTTP');
+}
+function netFollow(c) {
+  const {a, b, k} = posePair(c.poses, c.poseClock);
+  c.x = lerp(a[0], b[0], k); c.y = lerp(a[1], b[1], k);
+  c.h = a[2] + wrapA(b[2] - a[2]) * k;
+  c.vx = lerp(a[3], b[3], k); c.vy = lerp(a[4], b[4], k);
+  c.vF = lerp(a[5], b[5], k); c.slide = lerp(a[7], b[7], k); c.surf = k < .5 ? a[8] : b[8];
+  c.renderPose = k < .5 ? a : b;
 }
 function netTick(dt) {
   if (G.mode !== 'race') return;
@@ -2147,16 +2188,15 @@ function netTick(dt) {
 }
 function clientStep(dt) { // the local player's car: instant response whatever the network delay
   const c = G.cars[G.me]; if (!c || c.fin || G.mode !== 'race') return; c.thr = In.thr; c.brk = In.brk; c.steer = In.steer;
-  physics(c, dt); collide(); const T = G.track, N = T.N; let best = 1e18, bi = c.idx;
+  physics(c, dt); const T = G.track, N = T.N; let best = 1e18, bi = c.idx;
   for (let k = -22; k <= 22; k++) { const i = (c.idx + k + N) % N, dx = c.x - T.x[i], dy = c.y - T.y[i], d = dx * dx + dy * dy; if (d < best) { best = d; bi = i; } }
   c.idx = bi; c.d = (c.x - T.x[bi]) * T.nx[bi] + (c.y - T.y[bi]) * T.ny[bi]; barrier(c);
   if ((G.step = (G.step || 0) + 1) % 6 === 0) towCalc();
 }
 function applySnaps() {
   const S2 = G.snaps; if (!S2.length) return;
-  const now = performance.now(), broker = Net.hc && Net.hc.broker, rt = now - 110, d0 = now - (G.snapT || now); G.snapT = now; let a = S2[0], b = S2[S2.length - 1];
-  for (let i = 0; i < S2.length - 1; i++) if (S2[i].st <= rt && S2[i + 1].st >= rt) { a = S2[i]; b = S2[i + 1]; break; }
-  const k = b === a ? 1 : clamp((rt - a.st) / (b.st - a.st), 0, 1), L = S2[S2.length - 1];
+  const now = performance.now(), L = S2[S2.length - 1];
+  const {a, b, k} = posePair(S2, G.playback);
   G.h = L.h == null ? 5 : L.h; if (L.ws != null) G.wS = L.ws; if (L.bs) G.bs = L.bs;
   if (now - L.rt > 4000) return; // stale
   const prevPhase = G.phase; G.phase = L.ph; G.lt = L.lt; G.t = L.tm;
@@ -2164,11 +2204,7 @@ function applySnaps() {
   G.cars.forEach((c, i) => {
     const A = a.c[i], B = b.c[i], Lc = L.c[i]; if (!A || !B) return;
     const mine = i === G.me && !c.fin && !Lc[6];
-    if (!mine && broker && S2.length > 1) { // broker link: dead-reckon to "now" from the two latest states, then blend so nothing jumps
-      const P0 = S2[S2.length - 2], p = P0.c[i] || Lc, gap = Math.max(.03, (L.st - P0.st) / 1000), om = clamp(wrapA(Lc[2] - p[2]) / gap, -3, 3), t = clamp((now - L.st) / 1000 + (Net.rtt || 200) / 2000, 0, .5), hm = Lc[2] + om * t / 2, hold = Lc[13] || G.phase !== 'race';
-      const tx = hold ? Lc[0] : Lc[0] + Math.sin(hm) * Lc[3] * t, ty = hold ? Lc[1] : Lc[1] - Math.cos(hm) * Lc[3] * t, th = hold ? Lc[2] : Lc[2] + om * t;
-      const q = Math.hypot(tx - c.x, ty - c.y) > 500 ? 1 : 1 - Math.exp(-d0 / 1000 * 11); c.x = lerp(c.x, tx, q); c.y = lerp(c.y, ty, q); c.h += wrapA(th - c.h) * q; c.vF = Lc[3]; const f = Math.sin(c.h), g = -Math.cos(c.h); c.vx = f * c.vF; c.vy = g * c.vF; c.idx = Lc[5]; c.slide = Lc[7]; c.surf = Lc[9]; }
-    else if (!mine) { c.x = lerp(A[0], B[0], k); c.y = lerp(A[1], B[1], k); c.h = A[2] + wrapA(B[2] - A[2]) * k; c.vF = lerp(A[3], B[3], k);
+    if (!mine) { c.x = lerp(A[0], B[0], k); c.y = lerp(A[1], B[1], k); c.h = A[2] + wrapA(B[2] - A[2]) * k; c.vF = lerp(A[3], B[3], k);
       const f = Math.sin(c.h), g = -Math.cos(c.h); c.vx = f * c.vF; c.vy = g * c.vF; c.idx = Lc[5]; c.slide = Lc[7]; c.surf = Lc[9]; }
     else if (Lc[13]) { const q = 1 - Math.exp(-.2); c.x = lerp(c.x, Lc[0], q); c.y = lerp(c.y, Lc[1], q); c.h += wrapA(Lc[2] - c.h) * q; c.vx = c.vy = c.vF = c.vL = 0; c.idx = Lc[5]; }
     c.prog = Lc[4] * G.track.N + Lc[5]; c.best = Lc[8] || Infinity; c.lapStart = Lc[10]; c.tyre = Lc[11]; c.wear = Lc[12]; c.pitS = Lc[13] ? 1 : 0; c.pitSv = Lc[13] === 2 ? 1 : 0; c.pitT = Lc[14]; if (c.pitSv && !c.pitD) c.pitD = Math.max(1, c.pitT); if (!c.pitS) c.pitD = 0; c.qt = Lc[15]; c.qs = Lc[16]; if (Lc[17]) { c.sc = Lc[17]; c.ls = Lc[18]; c.bs = Lc[19]; }
